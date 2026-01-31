@@ -32,6 +32,7 @@ export default function BulkFixPage() {
 
   const [includeIntake, setIncludeIntake] = useState(false);
 
+  const [previewRan, setPreviewRan] = useState(false);
   const [previewCountAssets, setPreviewCountAssets] = useState<number | null>(null);
   const [previewCountIntake, setPreviewCountIntake] = useState<number | null>(null);
   const [previewIds, setPreviewIds] = useState<string[]>([]);
@@ -76,11 +77,13 @@ export default function BulkFixPage() {
   }, [facetRows, field]);
 
   function resetPreview() {
+    setPreviewRan(false);
     setPreviewCountAssets(null);
     setPreviewCountIntake(null);
     setPreviewIds([]);
   }
 
+  // Any change invalidates preview so Apply can't run “stale”
   useEffect(() => {
     resetPreview();
     setMsg(null);
@@ -128,7 +131,7 @@ export default function BulkFixPage() {
     }
     setPreviewIds((sampleRows ?? []).map((r: any) => r.id));
 
-    // Optional intake preview (unsorted only, so we don't rewrite history unless you really want it)
+    // Optional intake preview (unsorted only)
     if (includeIntake) {
       const { count: intakeCount, error: intakeErr } = await supabase
         .from("intake_items")
@@ -141,19 +144,37 @@ export default function BulkFixPage() {
         return;
       }
       setPreviewCountIntake(intakeCount ?? 0);
+    } else {
+      setPreviewCountIntake(null);
     }
+
+    setPreviewRan(true);
   }
+
+  const fromTrim = fromValue.trim();
+  const toTrim = toValue.trim();
+
+  const canApply =
+    previewRan &&
+    !busy &&
+    !!fromTrim &&
+    !!toTrim &&
+    fromTrim !== toTrim &&
+    (previewCountAssets ?? 0) > 0 &&
+    confirmText.trim().toUpperCase() === "APPLY";
 
   async function applyFix() {
     setErr(null);
     setMsg(null);
 
-    const from = fromValue.trim();
-    const to = toValue.trim();
+    const from = fromTrim;
+    const to = toTrim;
 
+    if (!previewRan) return setErr("Run Preview first (Apply is disabled until preview completes).");
     if (!from) return setErr("FROM value is required.");
     if (!to) return setErr("TO value is required.");
     if (from === to) return setErr("FROM and TO cannot be the same.");
+    if ((previewCountAssets ?? 0) <= 0) return setErr("Preview shows 0 matching assets. Nothing to apply.");
     if (confirmText.trim().toUpperCase() !== "APPLY") {
       return setErr('Type APPLY in the confirmation box to run the bulk update.');
     }
@@ -192,7 +213,6 @@ export default function BulkFixPage() {
             from,
             to,
             includeIntakeUnsrt: includeIntake,
-            // preview counts (if user ran preview)
             previewAssets: previewCountAssets,
             previewIntake: previewCountIntake,
           },
@@ -215,6 +235,10 @@ export default function BulkFixPage() {
   if (loading) return <main className="p-6">Loading...</main>;
   if (!session) return <main className="p-6">Redirecting...</main>;
 
+  const assetsN = previewCountAssets ?? 0;
+  const intakeN = includeIntake ? (previewCountIntake ?? 0) : 0;
+  const willTouch = previewRan ? assetsN + intakeN : 0;
+
   return (
     <main className="p-6 space-y-6">
       <div className="flex items-center justify-between">
@@ -224,10 +248,10 @@ export default function BulkFixPage() {
         </button>
       </div>
 
-      <div className="border rounded-xl p-4 space-y-3">
+      <div className="border rounded-xl p-4 space-y-4">
         <div className="text-sm text-gray-700">
-          This updates <strong>all Assets</strong> where a field matches a value (e.g. fix a typo like{" "}
-          <code>Helmte</code> → <code>Helmet</code>).
+          This updates <strong>all Assets</strong> where a field matches a value (e.g. fix{" "}
+          <code>Helmte</code> → <code>Helmet</code>). Preview first, then apply.
         </div>
 
         <div className="grid gap-3 md:grid-cols-3">
@@ -270,9 +294,15 @@ export default function BulkFixPage() {
               value={toValue}
               onChange={(e) => setToValue(e.target.value)}
               placeholder='e.g. "Helmet"'
+              list="toSuggestions"
               disabled={busy}
             />
-            <div className="text-xs text-gray-500">Type the corrected value exactly.</div>
+            <datalist id="toSuggestions">
+              {options.map((v) => (
+                <option key={v} value={v} />
+              ))}
+            </datalist>
+            <div className="text-xs text-gray-500">Suggestions included (you can still type).</div>
           </div>
         </div>
 
@@ -290,44 +320,54 @@ export default function BulkFixPage() {
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <button
-            className="border rounded-lg px-3 py-2"
-            onClick={loadFacets}
-            disabled={busy || facetLoading}
-          >
+          <button className="border rounded-lg px-3 py-2" onClick={loadFacets} disabled={busy || facetLoading}>
             {facetLoading ? "Refreshing…" : "Refresh list"}
           </button>
 
-          <button className="border rounded-lg px-3 py-2" onClick={preview} disabled={busy || !fromValue}>
+          <button className="border rounded-lg px-3 py-2 bg-black text-white disabled:opacity-50" onClick={preview} disabled={busy || !fromTrim}>
             Preview impact
           </button>
         </div>
 
-        {(previewCountAssets !== null || previewCountIntake !== null) && (
-          <div className="border rounded-xl p-3 bg-gray-50 text-sm space-y-2">
-            <div>
-              <strong>Assets matching:</strong>{" "}
-              {previewCountAssets !== null ? previewCountAssets : "—"}
+        {previewRan ? (
+          <div className="border rounded-xl p-4 bg-gray-50 space-y-2">
+            <div className="text-sm">
+              <strong>Preview:</strong> {assetsN} asset(s) match <code>{field}</code> ={" "}
+              <code>{fromTrim}</code>
+              {includeIntake && (
+                <>
+                  {" "}
+                  • {intakeN} unsorted intake item(s) match
+                </>
+              )}
             </div>
-            {includeIntake && (
-              <div>
-                <strong>Unsorted intake_items matching:</strong>{" "}
-                {previewCountIntake !== null ? previewCountIntake : "—"}
+
+            <div className="border rounded-lg p-3 bg-yellow-50">
+              <div className="font-semibold">
+                ⚠️ You are about to update {willTouch} record(s)
               </div>
-            )}
+              <div className="text-sm text-gray-700 mt-1">
+                {field}: <code>{fromTrim}</code> → <code>{toTrim || "?"}</code>
+              </div>
+            </div>
+
             {previewIds.length > 0 && (
               <div>
-                <div className="font-medium">Sample asset IDs:</div>
+                <div className="text-sm font-medium">Sample asset IDs:</div>
                 <div className="text-xs text-gray-600 break-all">{previewIds.join(", ")}</div>
               </div>
             )}
           </div>
+        ) : (
+          <div className="border rounded-xl p-3 bg-blue-50 text-sm">
+            <strong>Safety lock:</strong> Apply is disabled until you run <strong>Preview impact</strong>.
+          </div>
         )}
 
-        <div className="border rounded-xl p-3 bg-yellow-50 text-sm space-y-2">
-          <div className="font-medium">⚠️ Confirmation</div>
-          <div>
-            Type <strong>APPLY</strong> to enable the bulk update.
+        <div className="border rounded-xl p-4 bg-red-50 space-y-2">
+          <div className="font-semibold">Final confirmation</div>
+          <div className="text-sm text-gray-700">
+            Type <strong>APPLY</strong> to enable the update.
           </div>
           <input
             className="w-full border rounded-lg p-2"
@@ -339,7 +379,12 @@ export default function BulkFixPage() {
           <button
             className="border rounded-lg px-3 py-2 bg-black text-white disabled:opacity-50"
             onClick={applyFix}
-            disabled={busy}
+            disabled={!canApply}
+            title={
+              canApply
+                ? "Apply the bulk update"
+                : "Requires Preview + non-empty TO + matches > 0 + confirmation APPLY"
+            }
           >
             {busy ? "Applying…" : "Apply bulk fix"}
           </button>
