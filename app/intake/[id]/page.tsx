@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { supabase } from "@/lib/supabaseClient";
@@ -44,6 +44,46 @@ function uniqSorted(values: (string | null | undefined)[]) {
   const out = Array.from(new Set(values.map((v) => (v ?? "").trim()).filter(Boolean)));
   out.sort((a, b) => a.localeCompare(b));
   return out;
+}
+
+function normKey(s: string) {
+  return s.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normLoose(s: string) {
+  // looser: remove spaces entirely to catch spacing typos
+  return s.trim().toLowerCase().replace(/\s+/g, "");
+}
+
+function findNearMatch(typed: string, options: string[]) {
+  const t = typed.trim();
+  if (!t) return null;
+
+  const tKey = normKey(t);
+  const tLoose = normLoose(t);
+
+  // Exact (case/spacing-insensitive)
+  for (const o of options) {
+    if (normKey(o) === tKey) return o;
+  }
+  for (const o of options) {
+    if (normLoose(o) === tLoose) return o;
+  }
+
+  // Lightweight “close-ish” suggestions: prefix/contains (avoid heavy fuzzy)
+  const lower = tKey;
+  const candidates = options.filter((o) => {
+    const ok = normKey(o);
+    return ok.startsWith(lower) || ok.includes(lower) || lower.startsWith(ok);
+  });
+
+  // pick shortest candidate if any
+  if (candidates.length) {
+    candidates.sort((a, b) => a.length - b.length);
+    return candidates[0];
+  }
+
+  return null;
 }
 
 export default function IntakeDetailPage() {
@@ -94,7 +134,7 @@ export default function IntakeDetailPage() {
       .filter(Boolean);
   }, [tagsText]);
 
-  // ✅ Effective values MUST be declared before option memos that use them
+  // ✅ Effective values (use in validation + writes)
   const effectiveCategory = useMemo(() => {
     if (categoryPick === ADD_NEW) return categoryNew.trim();
     return categoryPick.trim();
@@ -143,6 +183,22 @@ export default function IntakeDetailPage() {
         .map((r) => r.sub_property)
     );
   }, [facetRows, effectiveCategory, effectiveProperty]);
+
+  // Typo / duplicate warnings for “Add new…”
+  const categoryNear = useMemo(() => {
+    if (categoryPick !== ADD_NEW) return null;
+    return findNearMatch(categoryNew, categoryOptions);
+  }, [categoryPick, categoryNew, categoryOptions]);
+
+  const propertyNear = useMemo(() => {
+    if (propertyPick !== ADD_NEW) return null;
+    return findNearMatch(propertyNew, propertyOptions);
+  }, [propertyPick, propertyNew, propertyOptions]);
+
+  const subPropertyNear = useMemo(() => {
+    if (subPropertyPick !== ADD_NEW) return null;
+    return findNearMatch(subPropertyNew, subPropertyOptions);
+  }, [subPropertyPick, subPropertyNew, subPropertyOptions]);
 
   async function loadFacets() {
     setFacetLoading(true);
@@ -198,7 +254,7 @@ export default function IntakeDetailPage() {
 
     setRawName(suggestedName);
 
-    // Populate picks from existing item values
+    // Populate picks from existing item values (we’ll reconcile after facets load)
     const itCat = (it.category ?? "").trim();
     const itProp = (it.property ?? "").trim();
     const itSub = (it.sub_property ?? "").trim();
@@ -226,20 +282,72 @@ export default function IntakeDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, session, id]);
 
-  // When category changes, clear downstream selections
+  // ✅ Reconcile existing values not present in dropdown options:
+  // If the select has a value that isn’t an option, flip to “Add new…” and prefill.
   useEffect(() => {
-    setPropertyPick("");
-    setPropertyNew("");
-    setSubPropertyPick("");
-    setSubPropertyNew("");
+    if (!item) return;
+
+    const itCat = (item.category ?? "").trim();
+    if (itCat) {
+      const exists = categoryOptions.includes(itCat);
+      if (!exists && categoryPick === itCat) {
+        setCategoryPick(ADD_NEW);
+        setCategoryNew(itCat);
+      }
+    }
+
+    const itProp = (item.property ?? "").trim();
+    if (itProp) {
+      const exists = propertyOptions.includes(itProp);
+      if (!exists && propertyPick === itProp) {
+        setPropertyPick(ADD_NEW);
+        setPropertyNew(itProp);
+      }
+    }
+
+    const itSub = (item.sub_property ?? "").trim();
+    if (itSub) {
+      const exists = subPropertyOptions.includes(itSub);
+      if (!exists && subPropertyPick === itSub) {
+        setSubPropertyPick(ADD_NEW);
+        setSubPropertyNew(itSub);
+      }
+    }
+    // we intentionally include option lists so this runs after facets load/filter
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [categoryPick, categoryNew]);
+  }, [item, categoryOptions, propertyOptions, subPropertyOptions]);
+
+  // ✅ Reset downstream selections ONLY when effective values change (not every keystroke)
+  const lastCatRef = useRef<string>("");
+  const lastPropRef = useRef<string>("");
 
   useEffect(() => {
-    setSubPropertyPick("");
-    setSubPropertyNew("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [propertyPick, propertyNew]);
+    const current = effectiveCategory;
+    if (lastCatRef.current === "") {
+      lastCatRef.current = current;
+      return;
+    }
+    if (lastCatRef.current !== current) {
+      setPropertyPick("");
+      setPropertyNew("");
+      setSubPropertyPick("");
+      setSubPropertyNew("");
+      lastCatRef.current = current;
+    }
+  }, [effectiveCategory]);
+
+  useEffect(() => {
+    const current = effectiveProperty;
+    if (lastPropRef.current === "") {
+      lastPropRef.current = current;
+      return;
+    }
+    if (lastPropRef.current !== current) {
+      setSubPropertyPick("");
+      setSubPropertyNew("");
+      lastPropRef.current = current;
+    }
+  }, [effectiveProperty]);
 
   async function save() {
     if (!id) return;
@@ -247,6 +355,19 @@ export default function IntakeDetailPage() {
     setBusy(true);
     setErr(null);
     setMsg(null);
+
+    // Guardrails: if user chose “Add new…” but typed nothing, don’t silently save null/empty.
+    if (categoryPick === ADD_NEW && !categoryNew.trim()) {
+      setBusy(false);
+      return setErr("Category: you selected “Add new…” but didn’t enter a value.");
+    }
+    if (propertyPick === ADD_NEW && !propertyNew.trim()) {
+      setBusy(false);
+      return setErr("Property: you selected “Add new…” but didn’t enter a value.");
+    }
+    if (subPropertyPick === ADD_NEW && subPropertyNew.trim().length === 0) {
+      // sub-property is optional; allow blank -> null
+    }
 
     const { error } = await supabase
       .from("intake_items")
@@ -319,6 +440,14 @@ export default function IntakeDetailPage() {
         setPromoteDone(true);
         setMsg("✅ Already promoted. You can finalize this intake item.");
         return;
+      }
+
+      // Guardrails: require explicit typed values if “Add new…” chosen
+      if (categoryPick === ADD_NEW && !categoryNew.trim()) {
+        throw new Error("Category is required before promoting (you selected “Add new…” but didn’t type a value).");
+      }
+      if (propertyPick === ADD_NEW && !propertyNew.trim()) {
+        throw new Error("Property is required before promoting (you selected “Add new…” but didn’t type a value).");
       }
 
       const finalName =
@@ -527,13 +656,47 @@ export default function IntakeDetailPage() {
             </select>
 
             {categoryPick === ADD_NEW && (
-              <input
-                className="w-full border rounded-lg p-2"
-                value={categoryNew}
-                onChange={(e) => setCategoryNew(e.target.value)}
-                placeholder="New category name"
-                disabled={locked}
-              />
+              <>
+                <input
+                  className="w-full border rounded-lg p-2"
+                  value={categoryNew}
+                  onChange={(e) => setCategoryNew(e.target.value)}
+                  placeholder="New category name"
+                  disabled={locked}
+                />
+                {categoryNear && normKey(categoryNear) !== normKey(categoryNew || "") && (
+                  <div className="text-xs text-amber-700">
+                    ⚠️ Similar existing value found: <span className="font-medium">{categoryNear}</span>
+                    <button
+                      type="button"
+                      className="ml-2 underline"
+                      onClick={() => {
+                        setCategoryPick(categoryNear);
+                        setCategoryNew("");
+                      }}
+                      disabled={locked}
+                    >
+                      Use it
+                    </button>
+                  </div>
+                )}
+                {categoryNear && normKey(categoryNear) === normKey(categoryNew || "") && (
+                  <div className="text-xs text-amber-700">
+                    ⚠️ This looks like an existing value: <span className="font-medium">{categoryNear}</span>
+                    <button
+                      type="button"
+                      className="ml-2 underline"
+                      onClick={() => {
+                        setCategoryPick(categoryNear);
+                        setCategoryNew("");
+                      }}
+                      disabled={locked}
+                    >
+                      Use it
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
 
@@ -555,13 +718,47 @@ export default function IntakeDetailPage() {
             </select>
 
             {propertyPick === ADD_NEW && (
-              <input
-                className="w-full border rounded-lg p-2"
-                value={propertyNew}
-                onChange={(e) => setPropertyNew(e.target.value)}
-                placeholder="New property name"
-                disabled={locked}
-              />
+              <>
+                <input
+                  className="w-full border rounded-lg p-2"
+                  value={propertyNew}
+                  onChange={(e) => setPropertyNew(e.target.value)}
+                  placeholder="New property name"
+                  disabled={locked}
+                />
+                {propertyNear && normKey(propertyNear) !== normKey(propertyNew || "") && (
+                  <div className="text-xs text-amber-700">
+                    ⚠️ Similar existing value found: <span className="font-medium">{propertyNear}</span>
+                    <button
+                      type="button"
+                      className="ml-2 underline"
+                      onClick={() => {
+                        setPropertyPick(propertyNear);
+                        setPropertyNew("");
+                      }}
+                      disabled={locked}
+                    >
+                      Use it
+                    </button>
+                  </div>
+                )}
+                {propertyNear && normKey(propertyNear) === normKey(propertyNew || "") && (
+                  <div className="text-xs text-amber-700">
+                    ⚠️ This looks like an existing value: <span className="font-medium">{propertyNear}</span>
+                    <button
+                      type="button"
+                      className="ml-2 underline"
+                      onClick={() => {
+                        setPropertyPick(propertyNear);
+                        setPropertyNew("");
+                      }}
+                      disabled={locked}
+                    >
+                      Use it
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
 
@@ -583,13 +780,47 @@ export default function IntakeDetailPage() {
             </select>
 
             {subPropertyPick === ADD_NEW && (
-              <input
-                className="w-full border rounded-lg p-2"
-                value={subPropertyNew}
-                onChange={(e) => setSubPropertyNew(e.target.value)}
-                placeholder="New sub-property name"
-                disabled={locked}
-              />
+              <>
+                <input
+                  className="w-full border rounded-lg p-2"
+                  value={subPropertyNew}
+                  onChange={(e) => setSubPropertyNew(e.target.value)}
+                  placeholder="New sub-property name"
+                  disabled={locked}
+                />
+                {subPropertyNear && normKey(subPropertyNear) !== normKey(subPropertyNew || "") && (
+                  <div className="text-xs text-amber-700">
+                    ⚠️ Similar existing value found: <span className="font-medium">{subPropertyNear}</span>
+                    <button
+                      type="button"
+                      className="ml-2 underline"
+                      onClick={() => {
+                        setSubPropertyPick(subPropertyNear);
+                        setSubPropertyNew("");
+                      }}
+                      disabled={locked}
+                    >
+                      Use it
+                    </button>
+                  </div>
+                )}
+                {subPropertyNear && normKey(subPropertyNear) === normKey(subPropertyNew || "") && (
+                  <div className="text-xs text-amber-700">
+                    ⚠️ This looks like an existing value: <span className="font-medium">{subPropertyNear}</span>
+                    <button
+                      type="button"
+                      className="ml-2 underline"
+                      onClick={() => {
+                        setSubPropertyPick(subPropertyNear);
+                        setSubPropertyNew("");
+                      }}
+                      disabled={locked}
+                    >
+                      Use it
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
